@@ -3,7 +3,7 @@ import warnings
 from time import time
 from collections import deque, defaultdict
 
-from twisted.internet import reactor, defer
+from twisted.internet import reactor, defer, task
 
 from scrapy.utils.defer import mustbe_deferred
 from scrapy.utils.httpobj import urlparse_cached
@@ -73,6 +73,9 @@ class Downloader(object):
         self.domain_concurrency = self.settings.getint('CONCURRENT_REQUESTS_PER_DOMAIN')
         self.ip_concurrency = self.settings.getint('CONCURRENT_REQUESTS_PER_IP')
         self.middleware = DownloaderMiddlewareManager.from_crawler(crawler)
+        self.idled = set()
+        self._idled_loop = task.LoopingCall(self._idled_check, self.idled)
+        self._idled_loop.start(30, now=False)
 
     def fetch(self, request, spider):
         def _deactivate(response):
@@ -111,7 +114,8 @@ class Downloader(object):
 
         def _deactivate(response):
             slot.active.remove(request)
-            self._maybe_close_slot(slot, key)
+            if not slot.active:
+                self.idled.add((key, slot))
             return response
 
         slot.active.add(request)
@@ -177,6 +181,7 @@ class Downloader(object):
         return not self.slots
 
     def close(self):
+        self._idled_loop.stop()
         for key, slot in self.slots.iteritems():
             print 'SLOT CLOSED', key, _ppcounters(slot.counters)
             if slot.latercall and slot.latercall.active():
@@ -184,28 +189,21 @@ class Downloader(object):
             if slot.closecall and slot.closecall.active():
                 slot.closecall.cancel()
 
-    def _maybe_close_slot(self, slot, key):
-        c = slot.counters
-        c['tested'] += 1
-        if not slot.active:
-            c['inactive'] += 1
-            closedelay = slot.delay + 1
-            if slot.closecall and slot.closecall.active():
-                c['reset'] += 1
-                slot.closecall.reset(closedelay)
-            else:
-                c['new'] += 1
-                slot.closecall = reactor.callLater(closedelay, self._do_close_slot, slot, key)
-        else:
-            c['active'] += 1
+    def _idled_check(self, idled):
+        mark = time() - 10
+        active = []
+        for key, slot in idled:
+            c = slot.counters
+            c['tested'] += 1
+            if slot.active:
+                c['active'] += 1
+                active.append((key, slot))
+            elif slot.lastseen < mark:
+                del self.slots[key]
+                print 'SLOT REMOVED', key, _ppcounters(c)
 
-    def _do_close_slot(self, slot, key):
-        c = slot.counters
-        if not slot.active:
-            print 'SLOT REMOVED', key, _ppcounters(c)
-            del self.slots[key]
-        else:
-            c['closefailed'] += 1
+        for p in active:
+            idled.remove(p)
 
 
 def _ppcounters(c):
