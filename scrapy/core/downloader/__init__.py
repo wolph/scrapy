@@ -177,7 +177,8 @@ class Downloader(object):
         return not self.slots
 
     def close(self):
-        for slot in self.slots.itervalues():
+        for key, slot in self.slots.iteritems():
+            print 'SLOT CLOSED', key, _ppcounters(slot.counters)
             if slot.latercall and slot.latercall.active():
                 slot.latercall.cancel()
             if slot.closecall and slot.closecall.active():
@@ -201,7 +202,11 @@ class Downloader(object):
     def _do_close_slot(self, slot, key):
         c = slot.counters
         if not slot.active:
-            print 'SLOT REMOVED', key, ' '.join('%s=%s' % (k, c[k]) for k in ('tested', 'active', 'inactive', 'reset', 'new', 'closefailed'))
+            print 'SLOT REMOVED', key, _ppcounters(c)
             del self.slots[key]
         else:
             c['closefailed'] += 1
+
+
+def _ppcounters(c):
+    return ' '.join('%s=%s' % (k, c[k]) for k in ('tested', 'active', 'inactive', 'reset', 'new', 'closefailed'))
